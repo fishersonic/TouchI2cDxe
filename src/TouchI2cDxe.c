@@ -184,7 +184,7 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
 
 #define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
 
-#define TOUCH_DRIVER_VERSION  "v10"
+#define TOUCH_DRIVER_VERSION  "v11"
 
 //
 // Poll no faster than every 10 ms (EFI timer units are 100 ns). The final
@@ -1215,9 +1215,12 @@ TouchRetry (
     TouchLog (Dev, "giving up after %d attempts", (UINT32)Dev->AttemptCount);
   }
 
+  // Clear the field BEFORE closing: TouchExitBootServices runs at TPL_NOTIFY
+  // and can preempt this notify, and between the close and the store it would
+  // otherwise call SetTimer on a freed event handle.
   gBS->SetTimer (Event, TimerCancel, 0);
-  gBS->CloseEvent (Event);
   Dev->RetryEvent = NULL;
+  gBS->CloseEvent (Event);
 }
 
 EFI_STATUS

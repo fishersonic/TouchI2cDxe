@@ -146,8 +146,16 @@ DwI2cControllerPresent (
   IN UINT32  Base
   );
 
-/** Disable the controller (best effort, bounded wait). **/
-VOID
+/**
+  Disable the controller and wait (bounded) for it to report disabled.
+  Disabling also flushes both FIFOs, which is what makes it usable as the
+  recovery step after a failed transfer.
+
+  @retval EFI_SUCCESS  the controller reports disabled.
+  @retval EFI_TIMEOUT  still enabled; its CON/TAR/timing registers cannot be
+                       reprogrammed and any queued commands are still live.
+**/
+EFI_STATUS
 DwI2cDisable (
   IN UINT32  Base
   );

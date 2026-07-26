@@ -33,6 +33,7 @@ typedef struct {
   UINT32   LogicalMaxRaw;
   UINT32   ReportSize;
   UINT32   ReportCount;
+  UINT8    ReportId;       // global per HID 1.11 6.2.2.7, so Push/Pop saves it
 } HID_GLOBALS;
 
 typedef struct {
@@ -46,6 +47,8 @@ typedef struct {
   UINT32   YBits;
   UINT32   XMax;
   UINT32   YMax;
+  BOOLEAN  Overflowed;      // an item was skipped, so later offsets in this
+                            // report are no longer trustworthy
 } RID_STATE;
 
 STATIC
@@ -64,10 +67,11 @@ GetRidState (
   }
   for (i = 0; i < MAX_REPORT_IDS; i++) {
     if (!Rids[i].Used) {
-      Rids[i].Used   = TRUE;
-      Rids[i].Id     = Id;
-      Rids[i].BitPos = 0;
-      Rids[i].TipOff = Rids[i].XOff = Rids[i].YOff = -1;
+      Rids[i].Used       = TRUE;
+      Rids[i].Id         = Id;
+      Rids[i].BitPos     = 0;
+      Rids[i].Overflowed = FALSE;
+      Rids[i].TipOff     = Rids[i].XOff = Rids[i].YOff = -1;
       return &Rids[i];
     }
   }
@@ -170,7 +174,11 @@ HidParseTouchLayout (
         case 0x1: G.LogicalMin       = SVal; break;
         case 0x2: G.LogicalMaxSigned = SVal; G.LogicalMaxRaw = UVal; break;
         case 0x7: G.ReportSize       = UVal; break;
-        case 0x8: ReportId           = (UINT8)UVal; AnyReportId = TRUE; break;
+        case 0x8:
+          ReportId    = (UINT8)UVal;
+          G.ReportId  = (UINT8)UVal;
+          AnyReportId = TRUE;       // sticky: Pop restores the ID, not this
+          break;
         case 0x9: G.ReportCount      = UVal; break;
         case 0xA:                   // Push
           if (Sp < GLOBAL_STACK_MAX) {
@@ -179,7 +187,8 @@ HidParseTouchLayout (
           break;
         case 0xB:                   // Pop
           if (Sp > 0) {
-            G = Stack[--Sp];
+            G        = Stack[--Sp];
+            ReportId = G.ReportId;
           }
           break;
         default: break;
@@ -214,14 +223,25 @@ HidParseTouchLayout (
           // loop and the multiplication by the maximum input report declared
           // in the already-validated I2C HID descriptor.
           //
+          // Skip the offending item rather than failing the whole descriptor.
+          // The bound is per-report, so applying it as a hard stop meant one
+          // oversized or degenerate item -- a vendor debug/firmware-update
+          // report declared after the digitizer collection, say -- discarded
+          // an already-parsed, perfectly good tip+X+Y report and left the
+          // device with no touch at all. Marking the report unusable keeps
+          // the arithmetic guarantees (no overflow, Off < MaxReportBits)
+          // while letting a good report elsewhere in the descriptor win.
+          //
           if ((G.ReportSize == 0) || (G.ReportCount == 0) ||
               (G.ReportSize > MaxReportBits) ||
               (G.ReportCount > (MaxReportBits / G.ReportSize))) {
-            return EFI_COMPROMISED_DATA;
+            R->Overflowed = TRUE;
+            goto NextItem;
           }
           ItemBits = G.ReportSize * G.ReportCount;
           if (R->BitPos > (MaxReportBits - ItemBits)) {
-            return EFI_COMPROMISED_DATA;
+            R->Overflowed = TRUE;
+            goto NextItem;
           }
           for (k = 0; k < G.ReportCount; k++) {
             UINT32  Usage;
@@ -253,6 +273,7 @@ HidParseTouchLayout (
           R->BitPos += ItemBits;
         }
       }
+NextItem:
       // Any main item (Input/Output/Feature/Collection/End) clears locals.
       NumUsages    = 0;
       HaveUsageMin = FALSE;
@@ -266,7 +287,7 @@ HidParseTouchLayout (
     UINT32  PayloadBits;
 
     PayloadBits = MaxReportBits - (AnyReportId ? 8 : 0);
-    if (Rids[k].Used && (Rids[k].TipOff >= 0) &&
+    if (Rids[k].Used && !Rids[k].Overflowed && (Rids[k].TipOff >= 0) &&
         (Rids[k].XOff >= 0) && (Rids[k].YOff >= 0) &&
         (Rids[k].BitPos <= PayloadBits) &&
         ((UINT32)Rids[k].TipOff < PayloadBits) &&
