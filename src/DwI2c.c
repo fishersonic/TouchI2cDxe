@@ -23,6 +23,15 @@
 #define DW_POLL_LIMIT       200000
 
 //
+// Whole-transfer stall budget. DW_POLL_LIMIT is reset by every byte of
+// progress, so on its own it is a per-byte deadline: a panel that clock
+// stretches just under the limit on each of 1024 bytes could hold the poll
+// timer (TPL_CALLBACK) for minutes and freeze rEFInd's UI. This caps the
+// total time any single transfer can spend stalled.
+//
+#define DW_XFER_SPIN_BUDGET (4 * DW_POLL_LIMIT)
+
+//
 // Never allow more than this many read commands in flight beyond what we have
 // drained, so the RX FIFO (16+ entries on the FCH instances) cannot overflow.
 //
@@ -57,7 +66,7 @@ DwI2cControllerPresent (
   return (BOOLEAN)(RegRd (Base, DW_IC_COMP_TYPE) == DW_IC_COMP_TYPE_VALUE);
 }
 
-VOID
+EFI_STATUS
 DwI2cDisable (
   IN UINT32  Base
   )
@@ -67,9 +76,16 @@ DwI2cDisable (
   RegWr (Base, DW_IC_ENABLE, 0);
   for (Spin = 0; Spin < DW_POLL_LIMIT; Spin++) {
     if ((RegRd (Base, DW_IC_ENABLE_STATUS) & DW_IC_ENABLE_STATUS_EN) == 0) {
-      break;
+      return EFI_SUCCESS;
     }
   }
+  //
+  // Callers must not treat a failed disable as cosmetic: IC_CON, IC_TAR and
+  // the SCL/SDA timing registers are ignored by the hardware while the
+  // controller is enabled, so continuing would silently keep the previous
+  // slave address and timing.
+  //
+  return EFI_TIMEOUT;
 }
 
 //
@@ -94,7 +110,16 @@ DwI2cInit (
   UINT32  Spin;
   UINT32  Speed;
 
-  DwI2cDisable (Base);
+  //
+  // Every register written below is ignored while the controller is enabled,
+  // and the enable-confirmation loop at the end would pass immediately on the
+  // still-set EN bit. Failing here instead means a stuck controller can never
+  // be mistaken for one that is correctly retargeted at a new slave address --
+  // which in the fallback sweep would attribute a panel to the wrong address.
+  //
+  if (EFI_ERROR (DwI2cDisable (Base))) {
+    return EFI_DEVICE_ERROR;
+  }
 
   //
   // Keep the firmware-selected speed if it is one we can drive (standard or
@@ -143,6 +168,37 @@ DwI2cInit (
 }
 
 /**
+  Return the controller to a known-idle state after a failed transfer.
+
+  Disabling flushes both FIFOs (DesignWare databook), which is the point: an
+  error exit can leave undrained RX bytes AND still-queued READ commands that
+  keep producing more. Those would be consumed as the leading bytes of the
+  next transfer, shifting an I2C-HID length prefix and silently corrupting
+  every report after it. CON/TAR/timing survive the disable, so the caller's
+  target and bus speed are preserved.
+**/
+STATIC
+VOID
+DwI2cRecover (
+  IN UINT32  Base
+  )
+{
+  UINT32  Spin;
+
+  if (EFI_ERROR (DwI2cDisable (Base))) {
+    return;                            // stuck; the next DwI2cInit will fail
+  }
+  RegWr (Base, DW_IC_ENABLE, DW_IC_ENABLE_ENABLE);
+  for (Spin = 0; Spin < DW_POLL_LIMIT; Spin++) {
+    if (RegRd (Base, DW_IC_ENABLE_STATUS) & DW_IC_ENABLE_STATUS_EN) {
+      break;
+    }
+  }
+  (VOID)RegRd (Base, DW_IC_CLR_TX_ABRT);
+  (VOID)RegRd (Base, DW_IC_CLR_STOP_DET);
+}
+
+/**
   Classify and clear a latched TX abort.
 
   @retval EFI_NO_RESPONSE   address NAK -- nothing at the slave address
@@ -170,12 +226,14 @@ DwI2cXfer (
   IN  UINTN        RLen
   )
 {
-  UINTN   WSent   = 0;
-  UINTN   RQueued = 0;
-  UINTN   RGot    = 0;
-  UINT32  Spin    = 0;
-  UINT32  Cmd;
-  UINT32  IcStatus;
+  UINTN       WSent     = 0;
+  UINTN       RQueued   = 0;
+  UINTN       RGot      = 0;
+  UINT32      Spin      = 0;
+  UINT32      TotalSpin = 0;
+  EFI_STATUS  Status;
+  UINT32      Cmd;
+  UINT32      IcStatus;
 
   if (((WLen == 0) && (RLen == 0)) ||
       ((WLen > 0) && (WBuf == NULL)) ||
@@ -191,7 +249,14 @@ DwI2cXfer (
     BOOLEAN  Progress = FALSE;
 
     if (RegRd (Base, DW_IC_RAW_INTR_STAT) & DW_IC_INTR_TX_ABRT) {
-      return ClassifyAbort (Base);
+      Status = ClassifyAbort (Base);
+      if (Status == EFI_DEVICE_ERROR) {
+        // An address NAK aborts before any data phase and the hardware
+        // flushes TX itself, so the cheap common case (polling a device with
+        // nothing pending) stays cheap. Anything else may strand data.
+        DwI2cRecover (Base);
+      }
+      return Status;
     }
 
     IcStatus = RegRd (Base, DW_IC_STATUS);
@@ -227,20 +292,30 @@ DwI2cXfer (
 
     if (Progress) {
       Spin = 0;
-    } else if (++Spin > DW_POLL_LIMIT) {
-      return EFI_TIMEOUT;
+    } else {
+      Spin++;
+      TotalSpin++;
+      if ((Spin > DW_POLL_LIMIT) || (TotalSpin > DW_XFER_SPIN_BUDGET)) {
+        DwI2cRecover (Base);
+        return EFI_TIMEOUT;
+      }
     }
   }
 
   // Wait for the STOP to complete so the next transfer starts from idle.
   for (Spin = 0; Spin < DW_POLL_LIMIT; Spin++) {
     if (RegRd (Base, DW_IC_RAW_INTR_STAT) & DW_IC_INTR_TX_ABRT) {
-      return ClassifyAbort (Base);
+      Status = ClassifyAbort (Base);
+      if (Status == EFI_DEVICE_ERROR) {
+        DwI2cRecover (Base);
+      }
+      return Status;
     }
     if ((RegRd (Base, DW_IC_STATUS) & DW_IC_STATUS_MST_ACTIVITY) == 0) {
       (VOID)RegRd (Base, DW_IC_CLR_STOP_DET);
       return EFI_SUCCESS;
     }
   }
+  DwI2cRecover (Base);
   return EFI_TIMEOUT;
 }

@@ -1215,9 +1215,12 @@ TouchRetry (
     TouchLog (Dev, "giving up after %d attempts", (UINT32)Dev->AttemptCount);
   }
 
+  // Clear the field BEFORE closing: TouchExitBootServices runs at TPL_NOTIFY
+  // and can preempt this notify, and between the close and the store it would
+  // otherwise call SetTimer on a freed event handle.
   gBS->SetTimer (Event, TimerCancel, 0);
-  gBS->CloseEvent (Event);
   Dev->RetryEvent = NULL;
+  gBS->CloseEvent (Event);
 }
 
 EFI_STATUS

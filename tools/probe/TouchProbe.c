@@ -117,6 +117,14 @@ MasterInit (
   RegWr (Base, DW_IC_TAR, SlaveAddr & 0x3FF);
 
   RegWr (Base, DW_IC_ENABLE, DW_IC_ENABLE_ENABLE);
+  // Wait for the enable to take effect: on a tile that was just AOAC-powered,
+  // commands written before EN reads back are discarded, which shows up as a
+  // spurious timeout and a wrong "nothing at this address" verdict.
+  for (Spin = 0; Spin < POLL_LIMIT; Spin++) {
+    if (RegRd (Base, DW_IC_ENABLE_STATUS) & DW_IC_ENABLE_STATUS_EN) {
+      break;
+    }
+  }
 }
 
 /**
@@ -149,6 +157,13 @@ XferReadReg (
         break;
       }
     }
+    // Without this the command is written into a full TX FIFO and dropped,
+    // and the drain loop below then reports "no ACK" for a device that is
+    // actually present -- a false negative in the tool that decides whether
+    // a new device profile gets added.
+    if (Spin >= POLL_LIMIT) {
+      return EFI_TIMEOUT;
+    }
     Cmd = WBuf[i];
     if ((i == 0) && (WLen > 0)) {
       // nothing special on first write beyond master START (implicit)
@@ -162,6 +177,9 @@ XferReadReg (
       if (RegRd (Base, DW_IC_STATUS) & DW_IC_STATUS_TFNF) {
         break;
       }
+    }
+    if (Spin >= POLL_LIMIT) {
+      return EFI_TIMEOUT;
     }
     Cmd = DW_IC_DATA_CMD_READ;
     if (i == 0) {

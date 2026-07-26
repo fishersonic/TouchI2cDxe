@@ -22,6 +22,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        # Don't leave the token in .git/config while the EDK2 clone, submodule
+        # init and full BaseTools/EDK2 build run as root in this container.
+        persist-credentials: false
 
     - name: Install dependencies
       run: |
