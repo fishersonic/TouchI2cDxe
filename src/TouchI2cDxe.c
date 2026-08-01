@@ -1324,6 +1324,7 @@ TouchI2cDxeEntry (
   )
 {
   EFI_STATUS  Status;
+  EFI_EVENT   RetryEvent;
   TOUCH_DEV   *Dev;
   EFI_HANDLE  *Handles;
   UINTN       HandleCount;
@@ -1454,7 +1455,23 @@ TouchI2cDxeEntry (
     Status = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
                                TouchRetry, Dev, &Dev->RetryEvent);
     if (!EFI_ERROR (Status)) {
-      gBS->SetTimer (Dev->RetryEvent, TimerPeriodic, TOUCH_RETRY_PERIOD);
+      Status = gBS->SetTimer (Dev->RetryEvent, TimerPeriodic,
+                             TOUCH_RETRY_PERIOD);
+      if (EFI_ERROR (Status)) {
+        DEBUG ((DEBUG_WARN, "TouchI2c: could not arm retry timer: %r\n",
+                Status));
+        TouchLog (Dev, "could not arm retry timer: %r", Status);
+
+        // Clear the field before closing for the same TPL-safety reason as
+        // TouchRetry(): ExitBootServices must never see a closed handle.
+        RetryEvent      = Dev->RetryEvent;
+        Dev->RetryEvent = NULL;
+        gBS->CloseEvent (RetryEvent);
+      }
+    } else {
+      DEBUG ((DEBUG_WARN, "TouchI2c: could not create retry event: %r\n",
+              Status));
+      TouchLog (Dev, "could not create retry event: %r", Status);
     }
   }
 
