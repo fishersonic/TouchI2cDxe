@@ -137,13 +137,40 @@
 #define GOODIX_I2C_ADDR_B   0x5D
 
 //
+// ELAN touchscreen 7-bit slave address, confirmed from the ASUS Zenbook
+// UX8402VV DSDT: \_SB.PC00.I2C0.TPL0 (ELAN9008) _CRS I2cSerialBusV2 with
+// SADR[0]=0x10 patched into the SlaveAddress field -- the classic ELAN
+// address.
+//
+#define ELAN_I2C_ADDR       0x10
+
+//
+// SCL high/low counts and SDA hold for one reference-clock rate. Programmed
+// only when this driver powered the controller on itself (the firmware never
+// ran the bus, so there is no programming to inherit); which set applies is
+// a property of the platform's I2C tile, so the matched profile picks it.
+//
+typedef struct {
+  UINT16  SsHcnt;      // 100 kHz high count
+  UINT16  SsLcnt;      // 100 kHz low count
+  UINT16  FsHcnt;      // 400 kHz high count
+  UINT16  FsLcnt;      // 400 kHz low count
+  UINT16  SdaHold;     // ~300 ns data hold
+} DW_I2C_TIMING;
+
+extern CONST DW_I2C_TIMING  gDwTimingAmdFch150M;    // AMD FCH, 150 MHz ref
+extern CONST DW_I2C_TIMING  gDwTimingIntelLpss133M; // Intel Serial IO, 133 MHz
+
+//
 // Layer-1 API (DwI2c.c): polled master-mode init and combined transfer.
+// Bases are UINTN: the AMD FCH instances sit at fixed 32-bit addresses, but
+// Intel Serial IO BAR0 is commonly above 4 GiB.
 //
 
 /** TRUE if IC_COMP_TYPE at this base reads back the DesignWare magic. **/
 BOOLEAN
 DwI2cControllerPresent (
-  IN UINT32  Base
+  IN UINTN  Base
   );
 
 /**
@@ -157,7 +184,7 @@ DwI2cControllerPresent (
 **/
 EFI_STATUS
 DwI2cDisable (
-  IN UINT32  Base
+  IN UINTN  Base
   );
 
 /**
@@ -166,15 +193,15 @@ DwI2cDisable (
   When the firmware ran this bus, the SCL high/low counts and SDA hold it
   programmed are known good for this board; they are kept and only master
   mode, target address and FIFO thresholds are reprogrammed. When ForceTiming
-  is set -- the tile was just powered on via AOAC and holds only IP reset
-  defaults -- the 400 kHz counts for the 150 MHz Phoenix FCH reference clock
-  are programmed instead.
+  is non-NULL -- the tile was just powered on (AOAC on AMD, LPSS reset
+  release on Intel) and holds only IP reset defaults -- the given 400 kHz
+  counts for that platform's reference clock are programmed instead.
 **/
 EFI_STATUS
 DwI2cInit (
-  IN UINT32   Base,
-  IN UINT8    SlaveAddr,
-  IN BOOLEAN  ForceTiming
+  IN UINTN                Base,
+  IN UINT8                SlaveAddr,
+  IN CONST DW_I2C_TIMING  *ForceTiming  OPTIONAL
   );
 
 /**
@@ -184,7 +211,7 @@ DwI2cInit (
 **/
 EFI_STATUS
 DwI2cXfer (
-  IN  UINT32       Base,
+  IN  UINTN        Base,
   IN  CONST UINT8  *WBuf,   OPTIONAL
   IN  UINTN        WLen,
   OUT UINT8        *RBuf,   OPTIONAL

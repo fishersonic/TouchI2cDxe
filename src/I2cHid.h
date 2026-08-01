@@ -87,7 +87,7 @@ typedef struct {
 
 EFI_STATUS
 I2cHidReadRegister (
-  IN  UINT32  Base,
+  IN  UINTN   Base,
   IN  UINT16  Reg,
   OUT UINT8   *Buf,
   IN  UINTN   Len
@@ -96,14 +96,14 @@ I2cHidReadRegister (
 /** Plain read (no register address) -- how input reports are retrieved. **/
 EFI_STATUS
 I2cHidRawRead (
-  IN  UINT32  Base,
+  IN  UINTN   Base,
   OUT UINT8   *Buf,
   IN  UINTN   Len
   );
 
 EFI_STATUS
 I2cHidCommand (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT16  CmdReg,
   IN UINT8   Arg,
   IN UINT8   Opcode
@@ -111,14 +111,14 @@ I2cHidCommand (
 
 EFI_STATUS
 I2cHidSetPower (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT16  CmdReg,
   IN UINT8   PowerState
   );
 
 EFI_STATUS
 I2cHidReset (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT16  CmdReg
   );
 

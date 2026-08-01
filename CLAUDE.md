@@ -19,6 +19,7 @@ Downstream consumers: `jlobue10/rEFInd_GUI` (3 install scripts) and `jlobue10/St
 - `src/I2cHid.c/.h` — Layer 2: HID-over-I2C transport (descriptor read, SET_POWER, RESET, raw input reads).
 - `src/HidParse.c/.h` — Layer 3a: minimal HID report-descriptor parser. Locates the first contact's Tip Switch and absolute X/Y plus their logical maxima.
 - `src/FchAoac.h` — FCH AOAC power-gating registers (un-gating the I2C tile, i.e. what the DSDT's `_PS0` does).
+- `src/IntelLpss.c/.h` — the Intel counterpart of the AOAC layer: finds a Serial IO I2C controller through `EFI_PCI_IO_PROTOCOL` (profiles name PCI location + device ID; both must match or it fails closed), forces D0, enables memory decode, reads the 64-bit BAR (may sit above 4 GiB — this is why every `Base` in layers 1–2 is `UINTN`), and releases the LPSS private resets at BAR+0x204. First consumer: ASUS Zenbook UX8402VV (ELAN9008 slave 0x10, HID desc reg 0x0001, controller 00:15.0 DID 0x51E8, 133 MHz reference clock → its own `DW_I2C_TIMING` set).
 - `tools/probe/TouchProbe.c` — a standalone UEFI Shell application that probes controllers/addresses and prints what answers. **This is the documented go/no-go for adding a new device profile** (`tools/uefi-probe.md`), so a wrong answer here propagates into wrong constants in `mProfiles[]`.
 - `tools/collect-hardware-info.sh` — Linux-side intake script for a new device (ACPI/DSDT, i2c, hid). Still carries stale Ally-X/Goodix wording.
 - `test_build.sh` — local build; mirrors `.github/workflows/build.yml`.
@@ -62,6 +63,8 @@ Process: substantive changes land via PR from an `audit/*` branch (see PRs #1, #
 3. **The driver un-gates the I2C tile itself** through the AOAC registers before touching controller MMIO. In a normal boot the firmware leaves the tile power-gated and the MMIO window reads garbage.
 
 **Detection is fail-closed and DMI-gated.** Probing requires a matching SMBIOS Type 1 (product) or Type 2 (baseboard) profile first. A matched profile tries its DSDT-confirmed base/address/descriptor-register, then alternates *on that same controller only*. Identified-but-unconfirmed devices (`I2cBase == 0`, "sweep profiles") get a bounded FCH base sweep. **Unknown hardware is never probed through fixed MMIO bases**, and if SMBIOS is unreadable, probing fails closed without touching AOAC or GPIO state. Do not weaken this — those addresses belong to something else entirely on a non-AMD-FCH platform.
+
+Intel profiles (`Platform == TouchPlatformIntelLpss`) keep `I2cBase == 0` without being sweep profiles — the platform field disambiguates, and their fallback pass sweeps alternate slave addresses/descriptor registers on their *own PCI-discovered controller only*, never the fixed FCH base list (those addresses mean something else entirely on Intel). `TouchProbe` routes by CPUID vendor for the same reason: AOAC writes stay off non-AMD machines.
 
 The two Steam Deck models are indistinguishable on the I2C side (same controller, slave address, descriptor register); **only the panel reset GPIO differs** (85 on Galileo, 69 on Jupiter), which is exactly why profiles carry a DMI product name — so a NAKing panel can never get another model's GPIO toggled.
 

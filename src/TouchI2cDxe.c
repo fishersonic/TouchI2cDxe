@@ -107,6 +107,7 @@
 #include "DwI2c.h"
 #include "FchAoac.h"
 #include "I2cHid.h"
+#include "IntelLpss.h"
 #include "HidParse.h"
 
 //
@@ -136,6 +137,16 @@
 //     FTS3528 slave 0x38, _DSM func 1 = 0x0000, AOAC device 6) except the
 //     panel reset line: GpioIo output GPIO 69 (GpioInt 68 unused).
 //
+//   ASUS Zenbook Pro 14 Duo UX8402VV:  the first Intel-platform device.
+//     \_SB.PC00.I2C0.TPL0 (ELAN9008/PNP0C50) I2cSerialBusV2 slave 0x10,
+//     400 kHz; _DSM(HID-I2C, func 1) = 0x0001. The controller is Intel
+//     Serial IO I2C0 in PCI mode: 00:15.0, DID 0x51E8, 64-bit BAR0 assigned
+//     by firmware (observed above 4 GiB under Windows), brought up through
+//     IntelLpss.c instead of AOAC. No panel reset GPIO in _CRS. (The
+//     ScreenPad Plus is ELAN9009 on I2C2 / 00:15.2 / 0x51EA -- same slave
+//     and descriptor register -- not targeted: rEFInd renders on the main
+//     panel.)
+//
 //
 // A profile with I2cBase == 0 is a "sweep profile": the device is positively
 // identified via SMBIOS, but its panel constants are not DSDT-confirmed, so
@@ -147,16 +158,32 @@
 //
 #define TOUCH_AOAC_SWEEP  0xFF
 
+//
+// Which bring-up path a profile's I2C controller needs. AMD FCH tiles live
+// at fixed sub-4GiB MMIO bases behind AOAC power gating; Intel Serial IO
+// controllers are PCI functions found through EFI_PCI_IO_PROTOCOL and held
+// in reset by the LPSS private registers (IntelLpss.c). Zero value = AMD so
+// the existing positional initializers keep their meaning.
+//
+typedef enum {
+  TouchPlatformAmdFch = 0,
+  TouchPlatformIntelLpss
+} TOUCH_PLATFORM;
+
 typedef struct {
-  CONST CHAR8  *Name;
-  CONST CHAR8  *DmiProduct;    // exact SMBIOS Type 1 product name
-  CONST CHAR8  *DmiBoardA;     // accepted SMBIOS Type 2 product names
-  CONST CHAR8  *DmiBoardB;
-  UINT32       I2cBase;        // 0 = sweep profile (see above)
-  UINT8        SlaveAddr;
-  UINT16       HidDescReg;
-  UINT8        AoacDev;        // FCH AOAC device index of the I2C tile
-  UINT32       ResetGpioReg;   // pin control register; 0 = no reset line
+  CONST CHAR8     *Name;
+  CONST CHAR8     *DmiProduct;    // exact SMBIOS Type 1 product name
+  CONST CHAR8     *DmiBoardA;     // accepted SMBIOS Type 2 product names
+  CONST CHAR8     *DmiBoardB;
+  UINT32          I2cBase;        // AMD only; 0 = sweep profile (see above)
+  UINT8           SlaveAddr;
+  UINT16          HidDescReg;
+  UINT8           AoacDev;        // FCH AOAC device index of the I2C tile
+  UINT32          ResetGpioReg;   // pin control register; 0 = no reset line
+  TOUCH_PLATFORM  Platform;
+  UINT16          PciDid;         // Intel only: expected device ID...
+  UINT8           PciDev;         // ...at PCI 00:PciDev.PciFunc
+  UINT8           PciFunc;
 } TOUCH_PROFILE;
 
 STATIC CONST TOUCH_PROFILE  mProfiles[] = {
@@ -168,6 +195,13 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
   { "Steam Deck LCD (FocalTech FTS3528)", "Jupiter", NULL, NULL,
     DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
     AMD_GPIO_REG (69) },
+  //
+  // Intel profiles: controller found via PCI, so I2cBase stays 0 without
+  // making these sweep profiles (Platform disambiguates).
+  //
+  { "ASUS Zenbook Pro 14 Duo UX8402VV (ELAN9008)", NULL, "UX8402VV", NULL,
+    0, ELAN_I2C_ADDR, 0x0001, 0, 0,
+    TouchPlatformIntelLpss, 0x51E8, 0x15, 0x0 },
   //
   // Sweep profiles: identified AMD handhelds whose panel constants are not
   // DSDT-confirmed. Board/product strings per the Linux kernel's DMI quirk
@@ -184,7 +218,7 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
 
 #define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
 
-#define TOUCH_DRIVER_VERSION  "v11"
+#define TOUCH_DRIVER_VERSION  "v12"
 
 //
 // Poll no faster than every 10 ms (EFI timer units are 100 ns). The final
@@ -223,7 +257,7 @@ typedef struct {
   BOOLEAN                         RotateActive;   // portrait matrix on landscape GOP
   CONST TOUCH_PROFILE             *Profile;       // matched profile; may be NULL
   EFI_GRAPHICS_OUTPUT_PROTOCOL    *Gop;           // cached for orientation checks
-  UINT32                          I2cBase;
+  UINTN                           I2cBase;        // may exceed 4 GiB on Intel
   UINT8                           SlaveAddr;
   I2C_HID_DESCRIPTOR              HidDesc;
   HID_TOUCH_LAYOUT                Layout;
@@ -240,16 +274,17 @@ typedef struct {
 #define TOUCH_FROM_ABS(a) BASE_CR (a, TOUCH_DEV, AbsolutePointer)
 
 STATIC CONST UINT8   mCandidateAddrs[]    = {
-  NVTK_I2C_ADDR, FTS_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
+  NVTK_I2C_ADDR, FTS_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B,
+  ELAN_I2C_ADDR
 };
 STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
 //
 // Controller bases tried by sweep profiles only (identity-gated; see
 // TOUCH_AOAC_SWEEP). Bases 0-3 map to AOAC tiles I2C0-I2C3;
 // DW_I2C_FCH_BASE_4 has no known AOAC index and is probed only if already
-// powered.
+// powered. UINTN so the detect loops can also walk an Intel BAR.
 //
-STATIC CONST UINT32  mSweepBases[] = {
+STATIC CONST UINTN  mSweepBases[] = {
   DW_I2C_FCH_BASE_0, DW_I2C_FCH_BASE_1, DW_I2C_FCH_BASE_2,
   DW_I2C_FCH_BASE_3, DW_I2C_FCH_BASE_4
 };
@@ -693,7 +728,7 @@ TouchPoll (
   }
 
   if (Dev->NeedReinit) {
-    if (EFI_ERROR (DwI2cInit (Dev->I2cBase, Dev->SlaveAddr, FALSE))) {
+    if (EFI_ERROR (DwI2cInit (Dev->I2cBase, Dev->SlaveAddr, NULL))) {
       return;
     }
     (VOID)I2cHidSetPower (Dev->I2cBase, Dev->HidDesc.wCommandRegister,
@@ -869,6 +904,38 @@ TouchDetect (
       continue;
     }
     IdentityMatched = TRUE;
+
+    if (Prof->Platform == TouchPlatformIntelLpss) {
+      UINTN  IntelBase;
+
+      //
+      // Intel path: locate + power the Serial IO PCI function, then the
+      // same DesignWare + HID-over-I2C stack as AMD. No AOAC, no fixed
+      // bases, no reset GPIO (the ELAN panels declare none in _CRS).
+      //
+      Status = IntelLpssPrepareI2c (Prof->PciDid, Prof->PciDev,
+                                    Prof->PciFunc, &IntelBase, &Fresh);
+      if (!EFI_ERROR (Status) && !DwI2cControllerPresent (IntelBase)) {
+        Status = EFI_NO_MAPPING;                 // COMP_TYPE mismatch
+      }
+      if (!EFI_ERROR (Status)) {
+        Status = DwI2cInit (IntelBase, Prof->SlaveAddr,
+                            Fresh ? &gDwTimingIntelLpss133M : NULL);
+      }
+      if (!EFI_ERROR (Status)) {
+        Status = I2cHidReadDescriptor (IntelBase, Prof->HidDescReg,
+                                       &Dev->HidDesc);
+      }
+      ProfStatus[p] = Status;
+      if (!EFI_ERROR (Status)) {
+        Dev->I2cBase   = IntelBase;
+        Dev->SlaveAddr = Prof->SlaveAddr;
+        Dev->Profile   = Prof;
+        return EFI_SUCCESS;
+      }
+      continue;
+    }
+
     if (Prof->I2cBase == 0) {
       ProfStatus[p] = EFI_NOT_FOUND;             // sweep profile, see below
       continue;
@@ -884,7 +951,8 @@ TouchDetect (
       continue;
     }
 
-    Status = DwI2cInit (Prof->I2cBase, Prof->SlaveAddr, Fresh);
+    Status = DwI2cInit (Prof->I2cBase, Prof->SlaveAddr,
+                        Fresh ? &gDwTimingAmdFch150M : NULL);
     if (!EFI_ERROR (Status)) {
       Status = I2cHidReadDescriptor (Prof->I2cBase, Prof->HidDescReg,
                                      &Dev->HidDesc);
@@ -923,7 +991,8 @@ TouchDetect (
   //
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     CONST TOUCH_PROFILE  *Prof;
-    CONST UINT32         *Bases;
+    CONST UINTN          *Bases;
+    UINTN                ProfBase;
     BOOLEAN              FreshByTile[4];
     UINTN                BaseCount, b;
 
@@ -932,8 +1001,23 @@ TouchDetect (
       continue;
     }
     ZeroMem (FreshByTile, sizeof (FreshByTile));
-    if (Prof->I2cBase != 0) {
-      Bases     = &Prof->I2cBase;
+    if (Prof->Platform == TouchPlatformIntelLpss) {
+      //
+      // Alternates only on this profile's own PCI controller (already
+      // prepared by the profile pass; the call is idempotent). Never the
+      // FCH base list -- those addresses mean something else entirely here.
+      //
+      if (EFI_ERROR (IntelLpssPrepareI2c (Prof->PciDid, Prof->PciDev,
+                                          Prof->PciFunc, &ProfBase,
+                                          &Fresh))) {
+        continue;
+      }
+      FreshByTile[0] = Fresh;
+      Bases          = &ProfBase;
+      BaseCount      = 1;
+    } else if (Prof->I2cBase != 0) {
+      ProfBase  = Prof->I2cBase;
+      Bases     = &ProfBase;
       BaseCount = 1;
     } else {
       //
@@ -949,14 +1033,23 @@ TouchDetect (
       BaseCount = ARRAY_SIZE (mSweepBases);
     }
     for (b = 0; b < BaseCount; b++) {
-      BOOLEAN  TileFresh;
+      BOOLEAN               TileFresh;
+      CONST DW_I2C_TIMING   *FreshTiming;
 
       if (!DwI2cControllerPresent (Bases[b])) {
         continue;
       }
-      TileFresh = ((Prof->I2cBase == 0) && (b < 4)) ? FreshByTile[b] : FALSE;
+      if (Prof->Platform == TouchPlatformIntelLpss) {
+        TileFresh   = FreshByTile[0];
+        FreshTiming = &gDwTimingIntelLpss133M;
+      } else {
+        TileFresh   = ((Prof->I2cBase == 0) && (b < 4))
+                        ? FreshByTile[b] : FALSE;
+        FreshTiming = &gDwTimingAmdFch150M;
+      }
       for (a = 0; a < ARRAY_SIZE (mCandidateAddrs); a++) {
-        if (EFI_ERROR (DwI2cInit (Bases[b], mCandidateAddrs[a], TileFresh))) {
+        if (EFI_ERROR (DwI2cInit (Bases[b], mCandidateAddrs[a],
+                                  TileFresh ? FreshTiming : NULL))) {
           continue;
         }
         for (r = 0; r < ARRAY_SIZE (mCandidateDescRegs); r++) {
@@ -1072,16 +1165,16 @@ TouchTryBringUp (
     return Status;
   }
 
-  TouchLog (Dev, "attempt %d: panel at base 0x%08x addr 0x%02x (%a), "
+  TouchLog (Dev, "attempt %d: panel at base 0x%lx addr 0x%02x (%a), "
             "VID 0x%04x PID 0x%04x, reportdesc %d bytes, maxinput %d",
-            (UINT32)Dev->AttemptCount, Dev->I2cBase, Dev->SlaveAddr,
+            (UINT32)Dev->AttemptCount, (UINT64)Dev->I2cBase, Dev->SlaveAddr,
             (Dev->Profile != NULL) ? Dev->Profile->Name : "identified profile",
             Dev->HidDesc.wVendorID, Dev->HidDesc.wProductID,
             Dev->HidDesc.wReportDescLength, Dev->HidDesc.wMaxInputLength);
   if (Dev->Verbose) {
-    Print (L"TouchI2cDxe: panel at I2C base 0x%08x addr 0x%02x, "
+    Print (L"TouchI2cDxe: panel at I2C base 0x%lx addr 0x%02x, "
            L"VID 0x%04x PID 0x%04x\n",
-           Dev->I2cBase, Dev->SlaveAddr,
+           (UINT64)Dev->I2cBase, Dev->SlaveAddr,
            Dev->HidDesc.wVendorID, Dev->HidDesc.wProductID);
   }
 
@@ -1281,6 +1374,17 @@ TouchI2cDxeEntry (
             (UINT32)HandleCount);
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     if (!TouchProfileMatchesIdentity (&mProfiles[p])) {
+      continue;
+    }
+    if (mProfiles[p].Platform == TouchPlatformIntelLpss) {
+      //
+      // No MMIO reads here: the controller may still be in D3/reset, and
+      // its BAR is unknown until IntelLpssPrepareI2c runs in TouchDetect.
+      //
+      TouchLog (Dev, "profile '%a': Intel Serial IO PCI 00:%02x.%x "
+                "(DID 0x%04x), discovered at detect time",
+                mProfiles[p].Name, mProfiles[p].PciDev, mProfiles[p].PciFunc,
+                mProfiles[p].PciDid);
       continue;
     }
     if (mProfiles[p].I2cBase == 0) {

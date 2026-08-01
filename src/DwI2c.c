@@ -40,27 +40,27 @@
 STATIC
 UINT32
 RegRd (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT32  Off
   )
 {
-  return MmioRead32 ((UINTN)Base + Off);
+  return MmioRead32 (Base + Off);
 }
 
 STATIC
 VOID
 RegWr (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT32  Off,
   IN UINT32  Val
   )
 {
-  MmioWrite32 ((UINTN)Base + Off, Val);
+  MmioWrite32 (Base + Off, Val);
 }
 
 BOOLEAN
 DwI2cControllerPresent (
-  IN UINT32  Base
+  IN UINTN  Base
   )
 {
   return (BOOLEAN)(RegRd (Base, DW_IC_COMP_TYPE) == DW_IC_COMP_TYPE_VALUE);
@@ -68,7 +68,7 @@ DwI2cControllerPresent (
 
 EFI_STATUS
 DwI2cDisable (
-  IN UINT32  Base
+  IN UINTN  Base
   )
 {
   UINT32  Spin;
@@ -89,26 +89,49 @@ DwI2cDisable (
 }
 
 //
-// SCL counts for 400 kHz (the speed the DSDT advertises for the touch bus)
-// and ~300 ns SDA hold at the 150 MHz Phoenix FCH reference clock. Programmed
-// when the tile had to be powered on here -- the firmware never ran it, so
-// there is no programming to inherit.
+// SCL counts for 100/400 kHz (the DSDTs advertise 400 kHz for every known
+// touch bus) and ~300 ns SDA hold, per reference clock. Programmed when the
+// tile had to be powered on here -- the firmware never ran it, so there is
+// no programming to inherit.
 //
-#define DW_FS_SCL_HCNT   136    // ~0.9 us high
-#define DW_FS_SCL_LCNT   225    // ~1.5 us low
-#define DW_SS_SCL_HCNT   600    // ~4.0 us high
-#define DW_SS_SCL_LCNT   705    // ~4.7 us low
-#define DW_SDA_HOLD_CNT  45     // ~300 ns
+// AMD FCH ("Phoenix"/"Sonoma Valley" APUs): 150 MHz.
+//
+CONST DW_I2C_TIMING  gDwTimingAmdFch150M = {
+  600,   // SsHcnt  ~4.0 us high
+  705,   // SsLcnt  ~4.7 us low
+  136,   // FsHcnt  ~0.9 us high
+  225,   // FsLcnt  ~1.5 us low
+  45     // SdaHold ~300 ns
+};
+
+//
+// Intel Serial IO (Tiger/Alder/Raptor Lake PCH): 133 MHz
+// (LPSS_I2C_CLOCK_HZ), counts per the Linux i2c-designware formula.
+//
+CONST DW_I2C_TIMING  gDwTimingIntelLpss133M = {
+  569,   // SsHcnt  ~4.3 us high
+  664,   // SsLcnt  ~5.0 us low
+  117,   // FsHcnt  ~0.9 us high
+  212,   // FsLcnt  ~1.6 us low
+  40     // SdaHold ~300 ns
+};
 
 EFI_STATUS
 DwI2cInit (
-  IN UINT32   Base,
-  IN UINT8    SlaveAddr,
-  IN BOOLEAN  ForceTiming
+  IN UINTN                Base,
+  IN UINT8                SlaveAddr,
+  IN CONST DW_I2C_TIMING  *ForceTiming  OPTIONAL
   )
 {
-  UINT32  Spin;
-  UINT32  Speed;
+  UINT32                Spin;
+  UINT32                Speed;
+  CONST DW_I2C_TIMING   *Timing;
+
+  //
+  // The fallback for the (unexpected) case of inherited timing with zeroed
+  // counts; a non-NULL ForceTiming always knows its own platform.
+  //
+  Timing = (ForceTiming != NULL) ? ForceTiming : &gDwTimingAmdFch150M;
 
   //
   // Every register written below is ignored while the controller is enabled,
@@ -127,7 +150,7 @@ DwI2cInit (
   // 400 kHz the DSDT advertises for it.
   //
   Speed = RegRd (Base, DW_IC_CON) & (3u << 1);
-  if (ForceTiming || (Speed != DW_IC_CON_SPEED_STD)) {
+  if ((ForceTiming != NULL) || (Speed != DW_IC_CON_SPEED_STD)) {
     Speed = DW_IC_CON_SPEED_FAST;
   }
   RegWr (Base, DW_IC_CON,
@@ -137,19 +160,19 @@ DwI2cInit (
   if (Speed == DW_IC_CON_SPEED_STD) {
     if ((RegRd (Base, DW_IC_SS_SCL_HCNT) == 0) ||
         (RegRd (Base, DW_IC_SS_SCL_LCNT) == 0)) {
-      RegWr (Base, DW_IC_SS_SCL_HCNT, DW_SS_SCL_HCNT);
-      RegWr (Base, DW_IC_SS_SCL_LCNT, DW_SS_SCL_LCNT);
+      RegWr (Base, DW_IC_SS_SCL_HCNT, Timing->SsHcnt);
+      RegWr (Base, DW_IC_SS_SCL_LCNT, Timing->SsLcnt);
     }
   } else {
-    if (ForceTiming ||
+    if ((ForceTiming != NULL) ||
         (RegRd (Base, DW_IC_FS_SCL_HCNT) == 0) ||
         (RegRd (Base, DW_IC_FS_SCL_LCNT) == 0)) {
-      RegWr (Base, DW_IC_FS_SCL_HCNT, DW_FS_SCL_HCNT);
-      RegWr (Base, DW_IC_FS_SCL_LCNT, DW_FS_SCL_LCNT);
+      RegWr (Base, DW_IC_FS_SCL_HCNT, Timing->FsHcnt);
+      RegWr (Base, DW_IC_FS_SCL_LCNT, Timing->FsLcnt);
     }
   }
-  if (ForceTiming) {
-    RegWr (Base, DW_IC_SDA_HOLD, DW_SDA_HOLD_CNT);
+  if (ForceTiming != NULL) {
+    RegWr (Base, DW_IC_SDA_HOLD, Timing->SdaHold);
   }
 
   RegWr (Base, DW_IC_INTR_MASK, 0);   // fully polled; no interrupts
@@ -180,7 +203,7 @@ DwI2cInit (
 STATIC
 VOID
 DwI2cRecover (
-  IN UINT32  Base
+  IN UINTN  Base
   )
 {
   UINT32  Spin;
@@ -207,7 +230,7 @@ DwI2cRecover (
 STATIC
 EFI_STATUS
 ClassifyAbort (
-  IN UINT32  Base
+  IN UINTN  Base
   )
 {
   UINT32  Src;
@@ -219,7 +242,7 @@ ClassifyAbort (
 
 EFI_STATUS
 DwI2cXfer (
-  IN  UINT32       Base,
+  IN  UINTN        Base,
   IN  CONST UINT8  *WBuf,   OPTIONAL
   IN  UINTN        WLen,
   OUT UINT8        *RBuf,   OPTIONAL
