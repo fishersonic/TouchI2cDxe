@@ -31,3 +31,6 @@
   UefiLib
   IoLib
   BaseLib
+
+[Protocols]
+  gEfiPciIoProtocolGuid                      ## CONSUMES

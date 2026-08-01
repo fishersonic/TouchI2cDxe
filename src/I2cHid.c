@@ -18,7 +18,7 @@
 
 EFI_STATUS
 I2cHidReadRegister (
-  IN  UINT32  Base,
+  IN  UINTN   Base,
   IN  UINT16  Reg,
   OUT UINT8   *Buf,
   IN  UINTN   Len
@@ -33,7 +33,7 @@ I2cHidReadRegister (
 
 EFI_STATUS
 I2cHidRawRead (
-  IN  UINT32  Base,
+  IN  UINTN   Base,
   OUT UINT8   *Buf,
   IN  UINTN   Len
   )
@@ -47,7 +47,7 @@ I2cHidRawRead (
 **/
 EFI_STATUS
 I2cHidCommand (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT16  CmdReg,
   IN UINT8   Arg,
   IN UINT8   Opcode
@@ -64,7 +64,7 @@ I2cHidCommand (
 
 EFI_STATUS
 I2cHidSetPower (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT16  CmdReg,
   IN UINT8   PowerState
   )
@@ -74,7 +74,7 @@ I2cHidSetPower (
 
 EFI_STATUS
 I2cHidReset (
-  IN UINT32  Base,
+  IN UINTN   Base,
   IN UINT16  CmdReg
   )
 {
