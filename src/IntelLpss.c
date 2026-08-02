@@ -177,10 +177,22 @@ IntelLpssPrepareI2c (
     if ((Resets & LPSS_PRIV_RESETS_FUNC) != LPSS_PRIV_RESETS_FUNC) {
       MmioWrite32 ((UINTN)Bar + LPSS_PRIV_RESETS,
                    LPSS_PRIV_RESETS_FUNC | LPSS_PRIV_RESETS_IDMA);
-      MmioWrite32 ((UINTN)Bar + LPSS_PRIV_REMAP_LO, (UINT32)Bar);
-      MmioWrite32 ((UINTN)Bar + LPSS_PRIV_REMAP_HI, (UINT32)RShiftU64 (Bar, 32));
       *FreshPowerOn = TRUE;
       DEBUG ((DEBUG_INFO, "TouchI2c: LPSS resets released at %lx\n", Bar));
+    }
+
+    //
+    // Remap and clock are programmed unconditionally, not just on a fresh
+    // power-on: Linux does the remap write at every probe, and the UX8402VV
+    // firmware -- which uses this controller for its own setup-UI touch --
+    // wipes both registers when it parks the controller at boot handoff
+    // (observed CLK=0, REMAP=0 with the resets already released). The clock
+    // write is guarded so a firmware-programmed divider is never clobbered.
+    //
+    MmioWrite32 ((UINTN)Bar + LPSS_PRIV_REMAP_LO, (UINT32)Bar);
+    MmioWrite32 ((UINTN)Bar + LPSS_PRIV_REMAP_HI, (UINT32)RShiftU64 (Bar, 32));
+    if (MmioRead32 ((UINTN)Bar + LPSS_PRIV_CLOCK_PARAMS) == 0) {
+      MmioWrite32 ((UINTN)Bar + LPSS_PRIV_CLOCK_PARAMS, LPSS_PRIV_CLOCK_1TO1);
     }
 
     *Base = (UINTN)Bar;
