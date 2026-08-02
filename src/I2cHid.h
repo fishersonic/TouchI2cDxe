@@ -125,7 +125,7 @@ I2cHidReset (
 /** Read + validate the 30-byte HID descriptor at DescReg. **/
 EFI_STATUS
 I2cHidReadDescriptor (
-  IN  UINT32              Base,
+  IN  UINTN               Base,
   IN  UINT16              DescReg,
   OUT I2C_HID_DESCRIPTOR  *Desc
   );

@@ -6,11 +6,13 @@
 > original ROG Xbox Ally X support.
 
 **Status: working on the ROG Xbox Ally X (since v1.0.0), the Steam Deck
-OLED (since v1.1.0) and the Steam Deck LCD (since v1.2.0) — all confirmed on
-hardware, including the portrait-to-landscape rotation on both Decks.**
+OLED (since v1.1.0), the Steam Deck LCD (since v1.2.0) and the ASUS Zenbook
+Pro 14 Duo UX8402VV (since v1.3.1, the first Intel-platform device) — all
+confirmed on hardware, including the portrait-to-landscape rotation on both
+Decks.**
 
-A UEFI driver that makes the built-in **HID-over-I2C touchscreen** of AMD
-handhelds usable in the [rEFInd](https://www.rodsbooks.com/refind/)
+A UEFI driver that makes a built-in **HID-over-I2C touchscreen** usable in
+the [rEFInd](https://www.rodsbooks.com/refind/)
 boot menu, by producing `EFI_ABSOLUTE_POINTER_PROTOCOL`. rEFInd consumes that
 protocol natively, so no rEFInd changes are needed — the driver is meant to load
 from rEFInd's `drivers_x64/` folder alongside
@@ -23,6 +25,7 @@ Supported devices (the profile table in `src/TouchI2cDxe.c`):
 | ASUS ROG Xbox Ally X | Novatek NVTK0603 | `AMDI0010` I2C0 @ `0xFEDC2000` | `0x01` | confirmed working |
 | Steam Deck OLED (Galileo) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
 | Steam Deck LCD (Jupiter) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
+| ASUS Zenbook Pro 14 Duo (`UX8402VV`) | ELAN9008 (main OLED) | Intel Serial IO I2C0, PCI `00:15.0` (DID `0x51E8`), BAR above 4 GiB | `0x10` | confirmed working (first Intel-platform device) |
 | ASUS ROG Ally 2023 (`RC71L`) | Goodix GT7868Q expected | sweep | sweep | untested sweep profile |
 | ASUS ROG Ally X 2024 (`RC72LA`) | unknown | sweep | sweep | untested sweep profile |
 | Lenovo Legion Go (`83E1`) | unknown | sweep | sweep | untested sweep profile; Legion Go 2 pending DMI confirmation |
@@ -35,13 +38,22 @@ baseboard (`RC73XA` / `RC73YA`). Missing or unknown identity fails closed
 before fixed MMIO, AOAC, or GPIO access. Both Decks use the same
 right-side-up portrait→landscape touch rotation, confirmed on hardware.
 
+The Zenbook is the first Intel-platform device: its controller is not an
+ACPI device at a fixed FCH address but a PCI function (Serial IO), found
+through `EFI_PCI_IO_PROTOCOL` and brought up via the LPSS private registers
+(`src/IntelLpss.c`) instead of AMD's AOAC power gating. Its touch matrix is
+landscape-native (3600×2256), so no rotation applies. The ScreenPad Plus
+(ELAN9009 on `00:15.2`) is deliberately not targeted — rEFInd renders on
+the main panel.
+
 This is a sibling to the Xbox 360 controller driver: that one binds USB gamepads;
 this one binds the I2C-HID touch panel that a USB driver structurally cannot see.
 
 ## Why a whole new driver
 
 These touchscreens are **not** USB devices — they sit on the SoC's **I2C** bus
-(ACPI `AMDI0010` DesignWare controller), spoken to with HID-over-I2C. A USB
+(a DesignWare controller: ACPI `AMDI0010` on AMD, a PCI Serial IO function on
+Intel), spoken to with HID-over-I2C. A USB
 driver never sees them, and no open-source UEFI HID-over-I2C driver existed.
 Full rationale, architecture, and the feasibility spike are in
 **[DESIGN.md](DESIGN.md)** (written for the Ally X; the architecture is

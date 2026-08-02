@@ -38,6 +38,19 @@
 #define LPSS_PRIV_REMAP_HI      0x244
 
 //
+// Private clock parameters: bit0 = clock enable, bits [15:1] = M and
+// [30:16] = N of the fractional divider, bit31 = update/gate. 1:1 passes
+// the 133 MHz reference through unchanged, which is what the DesignWare
+// SCL counts (both the firmware's and gDwTimingIntelLpss133M) assume.
+// The I2C instances observed so far ignore writes here (no divider
+// hardware, matching Linux intel-lpss skipping clock registration for
+// I2C), so the guarded write below is a no-op on them -- it exists for
+// any future Serial IO instance where the divider is real and parked.
+//
+#define LPSS_PRIV_CLOCK_PARAMS  0x200
+#define LPSS_PRIV_CLOCK_1TO1    0x80010003
+
+//
 // Serial IO I2C reference clock on Tiger/Alder/Raptor Lake PCHs
 // (Linux intel-lpss-pci.c bxt_i2c_info.clk_rate), from which the DesignWare
 // SCL counts in DwI2c.h's Intel timing set are derived.
